@@ -20,19 +20,44 @@ log() {
 cleanup() {
 	log INFO "cleanup done."
 }
+
 trap cleanup EXIT
 
+#创建基线表和收集表
+DB='trojan_detector.db'
+#初始化表结构
+sqlite3 "$DB" <<EOF
+CREATE TABLE IF NOT EXISTS baseline (
+	category TEXT,
+	key TEXT,
+	value TEXT
+);
+CREATE TABLE IF NOT EXISTS collected (
+	category TEXT,
+	key TEXT,
+	value TEXT
+);
+EOF
 #收集器框架
 #收集进程信息
 collect_processes() {
 	log INFO "=== Process List Start ==="
-	ps -eo pid,ppid,user,cmd | tee -a "$LOGFILE"
+	ps -eo pid,ppid,user,cmd | tee -a "$LOGFILE" | tail -n +2 | \
+	#每次读取输出的一行并跳过表头
+	while read -r pid ppid user cmd; do
+		sqlite3 "$DB" "INSERT INTO baseline (category, key, value)
+			       VALUES ('process', '$pid:$cmd', '$user (ppid=$ppid)');"
+	done
 	log INFO "=== Process List End ==="
 }
 #收集网络连接
 collect_network() {
 	log INFO "=== Network List Start ==="
-	ss -tulnp | tee -a "$LOGFILE"
+	ss -tulnp | tee -a "$LOGFILE" | tail -n +2 | \
+	while read -r proto state local peer proc; do
+		sqlite3 "$DB" "INSERT INTO baseline (category, key, value)
+			       VALUES ('network', '$proto:$local', '$state $proc');"
+	done
 	log INFO "=== Network List End ==="
 }
 #收集系统自启动配置
@@ -42,16 +67,18 @@ collect_autostart() {
 	
 	log INFO "=== Autostart List Start ==="
 	#显示用户自启动配置
-	crontab -l 2>/dev/null | tee -a "$LOGFILE"
-	#必须处理返回值，否则脚本会自动退出
-	if [ $? -ne 0 ]; then
-		log WARN "User crontab failed to read"
-	fi
+	crontab -l 2>/dev/null | tee -a "$LOGFILE" | \
+	while read -r line; do
+		sqlite3 "$DB" "INSERT INTO baseline (category, key, value)
+			       VALUES ('autostart', 'crontab:$USER', '$line');"
+	done
+	
 	#显示系统自启动配置
-	ls -l /etc/systemd/system/ /etc/rc*.d/ 2>/dev/null | tee -a "$LOGFILE"
-	if [ $? -ne 0 ]; then
-		log WARN "System autostart failed to read"
-	fi
+	ls -l /etc/systemd/system/ /etc/rc*.d/ 2>/dev/null | tee -a "$LOGFILE" | \
+	while read -r line; do
+		sqlite3 "$DB" "INSERT INTO baseline (category, key, value)
+			       VALUES ('autostart', 'system', '$line');"
+	done
 	
 	set -e
 	log INFO "=== Autostart List End ==="
@@ -59,10 +86,11 @@ collect_autostart() {
 #收集临时目录中的可执行文件
 collect_files() {
 	log INFO "=== File List Start ==="
-	find /tmp /var/tmp /dev/shm -type f -executable 2>/dev/null | tee -a "$LOGFILE"
-	if [ $? -ne 0 ]; then
-		log WARN "Executable file failed to read"
-	fi
+	find /tmp /var/tmp /dev/shm -type f -executable -printf "%p %M %s\n" 2>/dev/null | tee -a "$LOGFILE" | \
+	while read -r path perm size size; do
+		sqlite3 "$DB" "INSERT INTO baseline (category, key, value)
+			       VALUES ('file', '$path', 'perm=$perm size=$size');"
+	done
 	log INFO "=== File List End ==="
 }
 #收集器统一入口
